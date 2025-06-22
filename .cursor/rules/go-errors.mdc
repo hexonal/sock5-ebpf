@@ -1,0 +1,18 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Go 错误处理规范 (v1.0)
+
+本规则定义了 Go 语言中错误处理的最佳实践，强调显式处理、清晰的错误信息和合理的错误类型选择。
+
+## 错误处理
+
+错误处理的规范实践也与[API文档注释](mdc:go-comments.mdc#22-公共-api-注释-exported-identifiers)、[日志记录](mdc:go-config-logging.mdc#日志-logging)（特别是错误日志）以及[安全考量](mdc:go-security.mdc#4-错误处理与信息泄露)紧密相关。详细的包设计层面的错误处理原则参见 [Go 包设计规范](mdc:go-packages.mdc#4-错误处理-error-handling)。
+
+*   **显式处理**: **必须**检查函数返回的 `error` 值。忽略错误是不允许的，除非有充分理由并在注释中说明。
+    *   **AI 操作**: 检查代码中是否存在 `_` 接收 `error` 的情况，或调用返回 `error` 的函数但未检查其返回值。
+*   **错误信息**: 错误信息应清晰、具体，包含足够上下文 (详细错误上下文也应记录在[错误日志](mdc:go-config-logging.mdc#日志-logging)中)。优先使用 `fmt.Errorf("... %w", err)` 来包装错误，保留原始错误信息。
+*   **哨兵错误 (Sentinel Errors)**: 谨慎使用导出的错误变量（如 `var ErrNotFound = errors.New("not found")`）。优先使用错误类型 (`struct` 实现 `error` 接口) 或 `errors.Is`/`errors.As` 进行判断，这提供了更好的扩展性和上下文。
+*   **Panic**: 仅用于表示程序不可恢复的错误（如启动时配置错误、不可修复的内部状态）。常规的、可预期的错误处理应使用 `error` 返回值 (库代码应[避免 panic](mdc:go-packages.mdc#4-错误处理-error-handling))。

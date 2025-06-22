@@ -1,0 +1,233 @@
+services:
+  # 原有的Nginx代理管理器
+  nginx:
+    image: chishin/nginx-proxy-manager-zh:release
+    restart: unless-stopped
+    container_name: nginx-prod
+    networks:
+      - frontend
+    ports:
+      - '80:80'     # Public HTTP Port
+      - '443:443'   # Public HTTPS Port
+      - '81:81'     # Admin Web Port
+    environment:
+      PUID: 82
+      PGID: 82
+    volumes:
+      # 时区配置
+      - /etc/localtime:/etc/localtime:ro
+      - ./data:/data
+      - ./sspanel:/usr/src/app
+      - ./letsencrypt:/etc/letsencrypt
+
+  # 新增：Tailscale 数据平面/  # 代理池管理器 - 修正版本
+  headscale:
+    image: headscale/headscale:0.25-debug
+    container_name: headscale
+    command: serve
+    restart: unless-stopped
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    ports:
+      - "8082:8082"   # HTTP API (需要通过反向代理提供 HTTPS)
+      - "50443:50443" # gRPC
+      - "9090:9090"   # Metrics
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./headscale-data:/var/lib/headscale
+      - ./config/config.yaml:/etc/headscale/config.yaml:ro
+      - ./config/derp.yaml:/etc/headscale/derp.yaml:ro
+    devices:
+      - /dev/net/tun  # TUN设备访问
+    networks:
+      - frontend
+    depends_on:
+      - derper
+      - pg
+    environment:
+      - HEADSCALE_DATABASE_TYPE=postgres
+      - HEADSCALE_DATABASE_HOST=pg
+      - HEADSCALE_DATABASE_PORT=5432
+      - HEADSCALE_DATABASE_USER=tailscale
+      - HEADSCALE_DATABASE_PASS=tailscale
+      - HEADSCALE_DATABASE_NAME=tailscale
+
+  # DERP 服务器 - 修复端口映射
+  derper:
+    image: ghcr.io/yangchuansheng/derper:latest
+    container_name: derper
+    restart: unless-stopped
+    ports:
+      - "8080:8080"  # 修复：添加端口映射给 Nginx 代理
+      - "3478:3478/udp"        # STUN 端口
+    environment:
+      - DERP_DOMAIN=derp.domain.name #请修改
+      - DERP_CERTMODE=manual
+      - DERP_ADDR=:8080
+      - DERP_HTTP_PORT=8080
+      - DERP_STUN_PORT=3478
+      - DERP_VERIFY_CLIENTS=false
+      - DERP_HOSTNAME=derp.domain.name #请修改
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    networks:
+      - frontend
+
+  headplane:
+    image: ghcr.io/tale/headplane
+    container_name: headplane
+    restart: unless-stopped
+    ports:
+      - "3000:3000"   # Web UI
+    environment:
+      - HEADSCALE_URL=http://headscale:8082
+      - COOKIE_SECRET=
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./headscale-data:/var/lib/headscale:ro
+      # 修复：移除重复的挂载
+      - ./config/headplane.yaml:/etc/headplane/config.yaml:ro
+      - ./config/config.yaml:/etc/headscale/config.yaml:ro
+      - ./config/derp.yaml:/etc/headscale/derp.yaml:ro
+      # Docker socket 用于集成
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # 用户数据存储
+      - ./headplane-data:/var/lib/headplane
+    networks:
+      - frontend
+
+  tailscale-go-proxy:
+    # 默认优先使用 image 字段拉取官方镜像，如需本地构建请注释 image 字段并启用 build 字段
+    image: ghcr.io/hexonal/tailscale-go-proxy:latest
+    # build:
+    #   context: ..
+    #   dockerfile: Dockerfile
+    container_name: tailscale-go-proxy
+    ports:
+      - "8081:8081"
+      - "1080:1080"
+      - "1089:1089"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/tailscale-go-proxy-config.yaml:/app/config.yaml
+      # 修复：移除重复的挂载
+      - ./tailscale-data:/var/lib/tailscale
+      - ./tailscale-sock:/var/run/tailscale
+      - /dev/net/tun:/dev/net/tun
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - headscale
+      - derper
+      - pg
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun
+    networks:
+      - frontend
+
+  pg:
+    image: postgres:15
+    container_name: pg
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=tailscale
+      - POSTGRES_USER=tailscale
+      - POSTGRES_PASSWORD=tailscale
+    ports:
+      - "5432:5432"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./pg-data:/var/lib/postgresql/data
+    networks:
+      - frontend
+
+  redis:
+    image: redis:6.2
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ./redis-data:/data
+    networks:
+      - frontend
+    environment:
+      - REDIS_PASSWORD=12399999
+    command: ["redis-server", "--requirepass", "12399999"]
+
+  # wx-proxy 容器内简化监控 - 专注linuxService进程
+  # 核心功能：启动linuxService程序，获取PID，监控*.qq.com流量和SOCKS5认证
+  wx-proxy:
+    build:
+      context: ./linuxService
+      dockerfile: Dockerfile
+    container_name: wx-proxy
+    restart: unless-stopped
+    # 最小权限配置 - 只添加eBPF必需权限
+    privileged: false
+    user: root
+    # 只添加eBPF监控必需的capabilities
+    cap_add:
+      - SYS_ADMIN          # eBPF程序加载
+      - SYS_RESOURCE       # eBPF资源管理
+      - NET_ADMIN          # 网络监控
+      - SYS_PTRACE         # 进程跟踪
+    cap_drop:
+      - ALL
+    # 容器内简化监控命令
+    command: ["./wx-proxy", "--verbose", "--container-mode"]
+    environment:
+      # eBPF监控配置
+      - VERBOSE=true
+      - EBPF_PROGRAM=./socks5_monitor_container.o
+      - STATS_INTERVAL=10s
+      - CLEANUP_INTERVAL=5m
+      - LOG_LEVEL=debug
+      - CONTAINER_MODE=true
+      # Redis连接（bridge网络）
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=12399999
+    ports:
+      - "8089:8089"  # linuxService服务端口
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      # 容器内eBPF必需挂载（最小化）
+      - /sys/fs/bpf:/sys/fs/bpf:rw
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      # 应用挂载
+      - ./conf:/app/conf:ro
+      - ./swagger:/app/swagger:ro
+      - ./logs:/app/logs:rw
+    networks:
+      - frontend
+    depends_on:
+      - redis
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "wx-proxy", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  frontend:
+    name: docker-compose_frontend
+    driver: bridge
+    external: false
+    enable_ipv6: false
+    ipam:
+      driver: default

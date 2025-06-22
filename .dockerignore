@@ -1,0 +1,18 @@
+# 排除可能导致构建问题的文件
+.git
+.gitignore
+*.md
+coverage.*
+benchmark_results.txt
+test_*.sh
+logs/
+.cursor/
+
+# 排除本地构建产物
+wx-proxy
+wx-proxy-test
+# linuxService - 需要这个目标程序，不能排除
+
+# 排除可能的缓存文件
+.cache/
+vendor/ 
